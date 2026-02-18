@@ -1,154 +1,109 @@
-function optimize_pv_wiring()
+function evaluate_user_configuration()
 
 clc; clear; close all;
 
 %% =====================================================
-% BASIC SETTINGS
+% USER INPUT: DEFINE STRING CONFIGURATION
+% Each cell entry = one string (panels in series)
 %% =====================================================
 
-Npanels = 10;
-
-% Sun conditions
-Sun.Gbeam = 1000;     % W/m^2
-Sun.theta = 30;       % Sun angle (degrees)
-
-% Cell electrical parameters
-pvCell.Voc = 0.6;     % Volts per cell
-pvCell.Isc = 9;       % Amps at 1000 W/m^2
-pvCell.beta_V = -0.002;
-
-Vmin = 5;
-Vmax = 600;
+config = { [1 2 3], [4 5], [6 7], [8], [9 10 11] };
 
 %% =====================================================
-% PANEL CELL COUNTS
+% SYSTEM SETTINGS
 %% =====================================================
 
-panelCellCounts = [ ...
-    36, ...  % 3x12
-    36, ...  % 3x12
-    36, ...  % 3x12
-    20, ...  % 4x5
-    20, ...  % 4x5
-    26, ...
-    26, ...
-    46, ... 
-    46, ...
-    30];     % 3x10
+sunAngles = 0:5:80;
+Sun.Gbeam = 1000;
 
 %% =====================================================
-% DEFINE GROUPS + ANGLES PER PANEL
+% MAXEON GEN III Me1 CELL DATA
 %% =====================================================
 
-panelGroups = cell(1, Npanels);
+pvCell.Voc  = 0.730;
+pvCell.Isc  = 6.18;
+pvCell.Vmpp = 0.632;
+pvCell.Impp = 5.89;
 
-for p = 1:Npanels
+panelCellCounts = [36 36 36 20 20 26 26 46 46 30 30];
+
+%% =====================================================
+% MPPT LIMITS (PowerMR 10A)
+%% =====================================================
+
+Vmin_MPPT = 15;
+Vmax_MPPT = 60;
+
+%% =====================================================
+% SWEEP SUN ANGLE
+%% =====================================================
+
+totalPower = zeros(size(sunAngles));
+
+for a = 1:length(sunAngles)
     
-    Ncells = panelCellCounts(p);
-    groupSize = floor(Ncells/3);
+    Sun.theta = sunAngles(a);
+    thetaFactor = max(0, cosd(Sun.theta));
     
-    g1 = 1:groupSize;
-    g2 = groupSize+1 : 2*groupSize;
-    g3 = 2*groupSize+1 : Ncells;
+    systemPower = 0;
     
-    panelGroups{p}.cells = {g1, g2, g3};
-    panelGroups{p}.tilt  = [0, 20, 45];   % degrees
-    
-end
+    for s = 1:length(config)
+        
+        stringPanels = config{s};
+        
+        % ---- Compute string Vmpp ----
+        Vmpp_est = 0;
+        for p = stringPanels
+            Vmpp_est = Vmpp_est + panelCellCounts(p) * pvCell.Vmpp;
+        end
+        
+        % ---- Check MPPT voltage window ----
+        if Vmpp_est < Vmin_MPPT || Vmpp_est > Vmax_MPPT
+            continue
+        end
+        
+        % ---- Estimate raw string power ----
+        Praw = 0;
+        for p = stringPanels
+            Ncells = panelCellCounts(p);
+            Praw = Praw + Ncells * pvCell.Vmpp * pvCell.Impp * thetaFactor;
+        end
 
-%% =====================================================
-% COMPUTE IRRADIANCE PER CELL
-%% =====================================================
-
-G = cell(1, Npanels);
-
-for p = 1:Npanels
-    Ncells = panelCellCounts(p);
-    G{p} = computeGroupIrradiance(Ncells, panelGroups{p}, Sun);
-end
-
-%% =====================================================
-% CONNECT ALL PANELS IN SERIES
-%% =====================================================
-
-[V,I] = seriesIV(pvCell, 1:Npanels, G);
-
-Pmax = computeMPP(V, I, Vmin, Vmax);
-
-fprintf("\nTotal Maximum Power: %.2f W\n", Pmax);
-
-end
-
-%% =====================================================
-% IRRADIANCE FROM ANGLES
-%% =====================================================
-
-function G_cells = computeGroupIrradiance(Ncells, groups, Sun)
-
-G_cells = zeros(1, Ncells);
-
-for g = 1:length(groups.tilt)
-    
-    theta = abs(Sun.theta - groups.tilt(g));
-    Geff = Sun.Gbeam * cosd(theta);
-    
-    if Geff < 0
-        Geff = 0;
+        
+        % ---- Apply MPPT power caps ----
+        if Vmpp_est < 25
+            Pstring = min(Praw,150);
+        elseif Vmpp_est < 48
+            Pstring = min(Praw,250);
+        else
+            Pstring = min(Praw,400);
+        end
+        
+        systemPower = systemPower + Pstring;
+        
     end
     
-    G_cells(groups.cells{g}) = Geff;
-end
-
-end
-
-%% =====================================================
-% SERIES CONNECTION (cells → panels → string)
-%% =====================================================
-
-function [V,I] = seriesIV(pvCell, panelIdx, G)
-
-Ns = 300;
-
-V_total = zeros(1, Ns);
-I_total = inf(1, Ns);
-
-for p = panelIdx
+    totalPower(a) = systemPower;
     
-    G_cells = G{p};
-    Ncells  = length(G_cells);
-    
-    V_panel = linspace(0, pvCell.Voc * Ncells, Ns);
-    I_panel = inf(1, Ns);
-    
-    for c = 1:Ncells
-        
-        Voc_cell = pvCell.Voc;
-        Isc_cell = pvCell.Isc * (G_cells(c)/1000);
-        
-        Vc = linspace(0, Voc_cell, Ns);
-        Ic = Isc_cell * (1 - (Vc/Voc_cell).^1.3);
-        Ic(Ic < 0) = 0;
-        
-        I_panel = min(I_panel, Ic);
-    end
-    
-    V_total = V_total + V_panel;
-    I_total = min(I_total, I_panel);
-end
-
-V = V_total;
-I = I_total;
-
 end
 
 %% =====================================================
-% FIND MAXIMUM POWER
+% PLOT RESULT
 %% =====================================================
 
-function Pmax = computeMPP(V, I, Vmin, Vmax)
+figure;
+plot(sunAngles, totalPower, 'LineWidth',2);
+xlabel('Sun Angle (degrees)');
+ylabel('Total Delivered Power (W)');
+title('User-Defined MPPT Configuration');
+grid on;
 
-valid = (V >= Vmin & V <= Vmax);
-P = V(valid) .* I(valid);
-Pmax = max(P);
+%% =====================================================
+% PRINT PEAK POWER
+%% =====================================================
+
+[maxPower, idx] = max(totalPower);
+fprintf('\nMaximum delivered power = %.2f W at %d° sun angle\n', ...
+        maxPower, sunAngles(idx));
 
 end

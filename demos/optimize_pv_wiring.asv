@@ -1,0 +1,231 @@
+function optimize_pv_wiring()
+
+clc; clear; close all;
+
+%% ===============================
+% BASIC SETTINGS
+%% ===============================
+
+Npanels = 10;
+
+sunAngles = 0:5:80;    % degrees sweep
+
+Sun.Gbeam = 1000;      
+
+%% ===============================
+% MAXEON GEN III Me1 CELL DATA
+%% ===============================
+
+pvCell.Voc  = 0.730;
+pvCell.Isc  = 6.18;
+pvCell.Vmpp = 0.632;
+pvCell.Impp = 5.89;
+pvCell.Pmpp = 3.72;
+
+shapeFactor = 1.25;
+
+%% ===============================
+% PANEL CELL COUNTS
+%% ===============================
+
+panelCellCounts = [36 36 36 20 20 26 26 46 46 30];
+
+%% ===============================
+% DEFINE GROUP ANGLES
+%% ===============================
+
+panelGroups = cell(1,Npanels);
+
+for p = 1:Npanels
+    
+    Ncells = panelCellCounts(p);
+    groupSize = floor(Ncells/3);
+    
+    g1 = 1:groupSize;
+    g2 = groupSize+1 : 2*groupSize;
+    g3 = 2*groupSize+1 : Ncells;
+    
+    panelGroups{p}.cells = {g1,g2,g3};
+    panelGroups{p}.tilt  = [0 20 45];
+end
+
+%% ===============================
+% POSSIBLE SERIES/PARALLEL CONFIGS
+%% ===============================
+
+configs = [];
+for Ns = 1:Npanels
+    if mod(Npanels,Ns)==0
+        Np = Npanels/Ns;
+        configs = [configs; Ns Np];
+    end
+end
+
+%% ===============================
+% SUN ANGLE SWEEP
+%% ===============================
+
+bestPower = zeros(size(sunAngles));
+bestConfigIdx = zeros(size(sunAngles));
+
+for a = 1:length(sunAngles)
+    
+    Sun.theta = sunAngles(a);
+    
+    % compute irradiance
+    G = cell(1,Npanels);
+    for p = 1:Npanels
+        G{p} = computeGroupIrradiance(panelCellCounts(p), panelGroups{p}, Sun);
+    end
+    
+    maxPowerAngle = 0;
+    bestIdx = 1;
+    
+    % test all configurations
+    for c = 1:size(configs,1)
+        
+        Ns = configs(c,1); % panels in series
+        Np = configs(c,2); % parallel strings
+        
+        totalPower = computeSystemPower(pvCell, shapeFactor, G, Ns, Np);
+        
+        if totalPower > maxPowerAngle
+            maxPowerAngle = totalPower;
+            bestIdx = c;
+        end
+    end
+    
+    bestPower(a) = maxPowerAngle;
+    bestConfigIdx(a) = bestIdx;
+end
+
+%% ===============================
+% PLOT RESULTS
+%% ===============================
+
+figure;
+plot(sunAngles, bestPower,'LineWidth',2);
+xlabel('Sun Angle (degrees)');
+ylabel('Maximum Power (W)');
+title('Best Configuration Power vs Sun Angle');
+grid on;
+
+%% ===============================
+% PRINT WINNING CONFIGS
+%% ===============================
+
+fprintf('\nBest configuration per angle:\n');
+for a = 1:length(sunAngles)
+    Ns = configs(bestConfigIdx(a),1);
+    Np = configs(bestConfigIdx(a),2);
+    fprintf('Angle %2d° → %dS%dP\n', sunAngles(a), Ns, Np);
+end
+
+end
+
+%% =====================================================
+% COMPUTE SYSTEM POWER
+%% =====================================================
+
+function Pmax = computeSystemPower(pvCell, shapeFactor, G, Ns, Np)
+
+Nsamples = 400;
+
+% divide panels into parallel groups
+strings = cell(1,Np);
+
+panelIdx = 1;
+for p = 1:Np
+    strings{p} = panelIdx:(panelIdx+Ns-1);
+    panelIdx = panelIdx + Ns;
+end
+
+% build IV for each string
+for s = 1:Np
+    [Vstr,Istr] = seriesIV(pvCell, shapeFactor, strings{s}, G);
+    str{s}.V = Vstr;
+    str{s}.I = Istr;
+end
+
+% parallel combine
+[Vsys,Isys] = parallelIV(str);
+
+P = Vsys .* Isys;
+Pmax = max(P);
+
+end
+
+%% =====================================================
+% IRRADIANCE
+%% =====================================================
+
+function G_cells = computeGroupIrradiance(Ncells, groups, Sun)
+
+G_cells = zeros(1,Ncells);
+
+for g = 1:length(groups.tilt)
+    
+    theta = abs(Sun.theta - groups.tilt(g));
+    Geff = Sun.Gbeam * cosd(theta);
+    if Geff < 0
+        Geff = 0;
+    end
+    
+    G_cells(groups.cells{g}) = Geff;
+end
+
+end
+
+%% =====================================================
+% SERIES IV
+%% =====================================================
+
+function [V,I] = seriesIV(pvCell, shapeFactor, panelIdx, G)
+
+Ns = 400;
+V_total = zeros(1,Ns);
+I_total = inf(1,Ns);
+
+for p = panelIdx
+    
+    G_cells = G{p};
+    Ncells = length(G_cells);
+    
+    V_panel = linspace(0, pvCell.Voc*Ncells, Ns);
+    I_panel = inf(1,Ns);
+    
+    for c = 1:Ncells
+        
+        Voc = pvCell.Voc;
+        Isc = pvCell.Isc * (G_cells(c)/1000);
+        
+        Vc = linspace(0,Voc,Ns);
+        Ic = Isc * (1 - (Vc/Voc).^shapeFactor);
+        Ic(Ic<0)=0;
+        
+        I_panel = min(I_panel, Ic);
+    end
+    
+    V_total = V_total + V_panel;
+    I_total = min(I_total, I_panel);
+end
+
+V = V_total;
+I = I_total;
+
+end
+
+%% =====================================================
+% PARALLEL IV
+%% =====================================================
+
+function [V,I] = parallelIV(strings)
+
+V = strings{1}.V;
+I = zeros(size(V));
+
+for s = 1:length(strings)
+    I = I + interp1(strings{s}.V, strings{s}.I, V, 'linear', 0);
+end
+
+end
