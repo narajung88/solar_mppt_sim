@@ -1,149 +1,154 @@
 function optimize_pv_wiring()
 
-clc; clear;
+clc; clear; close all;
 
-%% ===============================
-% USER PARAMETERS
-% ===============================
+%% =====================================================
+% BASIC SETTINGS
+%% =====================================================
 
 Npanels = 10;
-MaxMPPTs = 3;
 
-G = [1000 900 750 600 500 1000 950 800 650 400];
-T = 25 * ones(1,Npanels);
+% Sun conditions
+Sun.Gbeam = 1000;     % W/m^2
+Sun.theta = 30;       % Sun angle (degrees)
 
-Vmin = 20;
-Vmax = 200;
+% Cell electrical parameters
+pvCell.Voc = 0.6;     % Volts per cell
+pvCell.Isc = 9;       % Amps at 1000 W/m^2
+pvCell.beta_V = -0.002;
 
-%% ===============================
-% PANEL MODEL
-% ===============================
+Vmin = 5;
+Vmax = 600;
 
-panel.Voc = 40;
-panel.Isc = 9;
-panel.alpha_I = 0.0005;
-panel.beta_V = -0.002;
+%% =====================================================
+% PANEL CELL COUNTS
+%% =====================================================
 
-%% ===============================
-% SEARCH
-% ===============================
+panelCellCounts = [ ...
+    36, ...  % 3x12
+    36, ...  % 3x12
+    36, ...  % 3x12
+    20, ...  % 4x5
+    20, ...  % 4x5
+    26, ...
+    26, ...
+    46, ... 
+    46, ...
+    30];     % 3x10
 
-bestPower = 0;
-bestConfig = [];
+%% =====================================================
+% DEFINE GROUPS + ANGLES PER PANEL
+%% =====================================================
 
-panels = 1:Npanels;
+panelGroups = cell(1, Npanels);
 
-for K = 1:MaxMPPTs
+for p = 1:Npanels
     
-    % Generate all ways to assign panels to K groups (ordered split only)
-    splits = nchoosek(1:Npanels-1, K-1);
+    Ncells = panelCellCounts(p);
+    groupSize = floor(Ncells/3);
     
-    if K == 1
-        configs = {{panels}};
-    else
-        configs = {};
-        for i = 1:size(splits,1)
-            idx = [0 splits(i,:) Npanels];
-            config = cell(1,K);
-            for k = 1:K
-                config{k} = panels(idx(k)+1:idx(k+1));
-            end
-            configs{end+1} = config;
-        end
+    g1 = 1:groupSize;
+    g2 = groupSize+1 : 2*groupSize;
+    g3 = 2*groupSize+1 : Ncells;
+    
+    panelGroups{p}.cells = {g1, g2, g3};
+    panelGroups{p}.tilt  = [0, 20, 45];   % degrees
+    
+end
+
+%% =====================================================
+% COMPUTE IRRADIANCE PER CELL
+%% =====================================================
+
+G = cell(1, Npanels);
+
+for p = 1:Npanels
+    Ncells = panelCellCounts(p);
+    G{p} = computeGroupIrradiance(Ncells, panelGroups{p}, Sun);
+end
+
+%% =====================================================
+% CONNECT ALL PANELS IN SERIES
+%% =====================================================
+
+[V,I] = seriesIV(pvCell, 1:Npanels, G);
+
+Pmax = computeMPP(V, I, Vmin, Vmax);
+
+fprintf("\nTotal Maximum Power: %.2f W\n", Pmax);
+
+end
+
+%% =====================================================
+% IRRADIANCE FROM ANGLES
+%% =====================================================
+
+function G_cells = computeGroupIrradiance(Ncells, groups, Sun)
+
+G_cells = zeros(1, Ncells);
+
+for g = 1:length(groups.tilt)
+    
+    theta = abs(Sun.theta - groups.tilt(g));
+    Geff = Sun.Gbeam * cosd(theta);
+    
+    if Geff < 0
+        Geff = 0;
     end
     
-    % Evaluate each config
-    for c = 1:length(configs)
+    G_cells(groups.cells{g}) = Geff;
+end
+
+end
+
+%% =====================================================
+% SERIES CONNECTION (cells → panels → string)
+%% =====================================================
+
+function [V,I] = seriesIV(pvCell, panelIdx, G)
+
+Ns = 300;
+
+V_total = zeros(1, Ns);
+I_total = inf(1, Ns);
+
+for p = panelIdx
+    
+    G_cells = G{p};
+    Ncells  = length(G_cells);
+    
+    V_panel = linspace(0, pvCell.Voc * Ncells, Ns);
+    I_panel = inf(1, Ns);
+    
+    for c = 1:Ncells
         
-        config = configs{c};
-        totalPower = 0;
+        Voc_cell = pvCell.Voc;
+        Isc_cell = pvCell.Isc * (G_cells(c)/1000);
         
-        for k = 1:length(config)
-            
-            panels_k = config{k};
-            strings = split_into_series_strings(panels_k);
-            
-            mppt = buildMPPT(panel, strings, G, T);
-            Pk = computeMPP(mppt.V, mppt.I, Vmin, Vmax);
-            
-            totalPower = totalPower + Pk;
-        end
+        Vc = linspace(0, Voc_cell, Ns);
+        Ic = Isc_cell * (1 - (Vc/Voc_cell).^1.3);
+        Ic(Ic < 0) = 0;
         
-        if totalPower > bestPower
-            bestPower = totalPower;
-            bestConfig = config;
-        end
+        I_panel = min(I_panel, Ic);
     end
-end
-
-%% ===============================
-% RESULT
-% ===============================
-
-fprintf("\n===== OPTIMAL WIRING =====\n");
-fprintf("Total Power: %.2f W\n\n", bestPower);
-
-for k = 1:length(bestConfig)
-    fprintf("MPPT %d panels: %s\n", k, mat2str(bestConfig{k}));
-end
-
-end
-
-%% =============================================================
-% Helper functions
-%% =============================================================
-
-function strings = split_into_series_strings(panels)
-% Simple strategy: put all panels in one series string
-strings = {panels};
-end
-
-function mppt = buildMPPT(panel, strings, G, T)
-
-for s = 1:length(strings)
-    idx = strings{s};
-    [V,I] = seriesIV(panel, idx, G, T);
-    str{s}.V = V;
-    str{s}.I = I;
-end
-
-[mppt.V, mppt.I] = parallelIV(str);
-mppt.P = mppt.V .* mppt.I;
-
-end
-
-function [V,I] = seriesIV(panel, idx, G, T)
-
-Ns = 200;
-V = linspace(0, panel.Voc*length(idx), Ns);
-I = inf(1,Ns);
-
-for i = idx
-    Voc_i = panel.Voc * (1 + panel.beta_V*(T(i)-25));
-    Isc_i = panel.Isc * (G(i)/1000);
     
-    Vp = linspace(0, Voc_i, Ns);
-    Ip = Isc_i * (1 - (Vp/Voc_i).^1.3);
-    Ip(Ip<0)=0;
-    
-    I = min(I, Ip);
-end
+    V_total = V_total + V_panel;
+    I_total = min(I_total, I_panel);
 end
 
-function [V,I] = parallelIV(strings)
+V = V_total;
+I = I_total;
 
-V = strings{1}.V;
-I = zeros(size(V));
-
-for s = 1:length(strings)
-    I = I + interp1(strings{s}.V, strings{s}.I, V, 'linear',0);
-end
 end
 
-function Pmax = computeMPP(V,I,Vmin,Vmax)
+%% =====================================================
+% FIND MAXIMUM POWER
+%% =====================================================
 
-valid = (V>=Vmin & V<=Vmax);
-P = V(valid).*I(valid);
+function Pmax = computeMPP(V, I, Vmin, Vmax)
+
+valid = (V >= Vmin & V <= Vmax);
+P = V(valid) .* I(valid);
 Pmax = max(P);
 
 end
