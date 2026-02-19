@@ -18,7 +18,7 @@ for i = 1:length(groups)
 end
 
 %%Define system settings (sun angles)
-panelTilt = [10 10 10 5 5 15 15 0 0 20 20]; % degrees, arbitrary values right now
+panelTilt = [15 15 15 5 5 0 0 20 20 20 20]; % degrees, arbitrary values right now
 
 sunAngles = 0:5:80;
 Sun.Gbeam = 1000;
