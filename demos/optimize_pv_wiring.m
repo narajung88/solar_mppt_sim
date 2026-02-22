@@ -49,53 +49,59 @@ totalPower = zeros(size(sunAngles));
 
 for a = 1:length(sunAngles)
     
-    Sun.theta = sunAngles(a);
+    model = "solar_array_sim";  % your Simulink/Simscape model
+load_system(model);
 
+for a = 1:length(sunAngles)
+    Sun.theta = sunAngles(a);
     systemPower = 0;
-    
+
     for s = 1:length(config)
-        
         stringPanels = config{s};
-        
-        %%Compute string Vmpp
+
+        % Optional: keep your MPPT window pre-check using estimated Vmpp
         Vmpp_est = 0;
         for p = stringPanels
             Vmpp_est = Vmpp_est + panelCellCounts(p) * pvCell.Vmpp;
         end
-        
-        %%Check MPPT voltage window
         if Vmpp_est < Vmin_MPPT || Vmpp_est > Vmax_MPPT
             continue
         end
-        
-        %%Estimate raw string power
-        Praw = 0;
-        for p = stringPanels
-            Ncells = panelCellCounts(p);
+
+        % Build irradiance vector for ONLY panels in this string
+        G = zeros(1, numel(stringPanels));
+        for k = 1:numel(stringPanels)
+            p = stringPanels(k);
             theta_inc = Sun.theta - panelTilt(p);
-            %%Each panel contributes different irradiance based on its
-            %%angle from horizontal, calculate angles
             thetaFactor = max(0, cosd(theta_inc));
-            Praw = Praw + Ncells * pvCell.Vmpp * pvCell.Impp * thetaFactor;
+            G(k) = Sun.Gbeam * thetaFactor;  % W/m^2
         end
-        
-        %%Apply MPPT power caps
-        if Vmpp_est < 25
-            Pstring = min(Praw,150);
-        elseif Vmpp_est < 48
-            Pstring = min(Praw,250);
-        else
-            Pstring = min(Praw,400);
-        end
-        
-        %%Add Pstring to the matrix
+
+        % Create simulation input and set variables
+        in = Simulink.SimulationInput(model);
+
+        % Example model parameters you create in the model workspace:
+        %   Nseries = number of panels in the string
+        %   Gvec    = irradiance vector for each panel in the string
+        in = in.setVariable("Nseries", numel(stringPanels));
+        in = in.setVariable("Gvec", G);
+
+        % (Optional) also pass temperature, PV params, etc.
+        % in = in.setVariable("Tcell", 25);
+
+        out = sim(in);
+
+        % Extract delivered power (you must log it as logsout signal "P_out")
+        logs = out.logsout;
+        Pts = logs.get("P_out").Values;     % timeseries
+        Pstring = mean(Pts.Data(end-50:end)); % steady average near end
+
         stringPowerMatrix(s,a) = Pstring;
         systemPower = systemPower + Pstring;
-        
     end
-    
+
     totalPower(a) = systemPower;
-    
+end
 end
 
 %%Plot our results
