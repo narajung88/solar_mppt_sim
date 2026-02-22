@@ -6,16 +6,16 @@ clc; clear; close all;
 % Each cell entry = one string (panels in series)
 % Input must be entered in in this format: [1 2 3]; [4 5]; [6 7]; [8]; [9 10 11]
 
-%%Hardcoded line gone: config = { [1 2 3], [4 5], [6 7], [8], [9 10 11] };
-userInput = input('Enter panel groupings (e.g. [1 2 3]; [4 5]; [6]): ', 's');
+config = { [1 2 3], [4 5], [6 7], [8], [9 10 11] };
+%%userInput = input('Enter panel groupings (e.g. [1 2 3]; [4 5]; [6]): ', 's');
 
 % Convert string into cell array
-groups = strsplit(userInput, ';');
-config = cell(1, length(groups));
+%%groups = strsplit(userInput, ';');
+%%config = cell(1, length(groups));
 
-for i = 1:length(groups)
-    config{i} = str2num(groups{i}); 
-end
+%%for i = 1:length(groups)
+%%    config{i} = str2num(groups{i}); 
+%%end
 
 %%Define system settings (sun angles)
 panelTilt = [15 15 15 5 5 0 0 20 20 20 20]; % degrees, arbitrary values right now
