@@ -1,183 +1,113 @@
-function build_solar_array()
-% BUILD_SOLAR_ARRAY  Programmatically constructs the solar_array_sim.slx
-%   Simscape Electrical model. Run this ONCE to generate the model, then
-%   use evaluate_user_configuration.m to run sweeps against it.
-%
-%   Model structure:
-%       - 5 String subsystems, each with PV panels in series + MPPT placeholder
-%       - All strings connected in parallel to a common resistive load
-%       - P_out signal logged per string and as total
-%
-%   Requirements:
-%       - Simscape & Simscape Electrical toolboxes
-%       - MATLAB R2021b or later recommended
-
+function build_solar_array_top_level()
 clc;
-
 model = 'solar_array_sim';
 
-%% --- Create or overwrite model ---
-if bdIsLoaded(model)
-    close_system(model, 0);
-end
-if exist([model '.slx'], 'file')
-    delete([model '.slx']);
-end
-new_system(model);
-open_system(model);
+if bdIsLoaded(model), close_system(model, 0); end
+if exist([model '.slx'], 'file'), delete([model '.slx']); end
+new_system(model); open_system(model);
 
-% Set solver for Simscape (variable-step, ode23t works well for electrical)
-set_param(model, 'Solver', 'ode23t');
-set_param(model, 'StopTime', '0.1');  % short sim; adjust as needed
+set_param(model, 'Solver',   'ode23t');
+set_param(model, 'StopTime', '0.1');
 
-%% --- Top-level blocks ---
-
-% Solver Configuration (required for every Simscape model)
-add_block('nesl_utility/Solver Configuration', [model '/SolverConfig']);
-set_param([model '/SolverConfig'], 'Position', posXY(50, 50));
-
-% Electrical reference (ground)
-add_block('fl_lib/Electrical/Electrical Elements/Electrical Reference', ...
-    [model '/Ground']);
-set_param([model '/Ground'], 'Position', posXY(150, 400));
-
-% Load resistor (shared across all parallel strings)
-add_block('fl_lib/Electrical/Electrical Elements/Resistor', ...
-    [model '/R_Load']);
-set_param([model '/R_Load'], 'R', 'R_load');  % set R_load in workspace
-set_param([model '/R_Load'], 'Position', posXY(600, 200));
-
-%% --- String subsystem config ---
-% Must match config in evaluate_user_configuration.m
-config = { [1 2 3], [4 5], [6 7], [8], [9 10 11] };
+config   = { [1 2 3], [4 5], [6 7], [8], [9 10 11] };
 nStrings = numel(config);
 
-stringHandles = zeros(1, nStrings);
+%% --- Infrastructure ---
+add_block('nesl_utility/Solver Configuration', [model '/SolverConfig']);
+set_param([model '/SolverConfig'], 'Position', posXY(60, 60));
 
+add_block('fl_lib/Electrical/Electrical Elements/Electrical Reference', [model '/Ground']);
+set_param([model '/Ground'], 'Position', posXY(900, 500));
+
+add_block('fl_lib/Electrical/Electrical Elements/Resistor', [model '/R_Load']);
+set_param([model '/R_Load'], 'R', 'R_load');
+set_param([model '/R_Load'], 'Position', posXY(820, 280));
+
+add_block('fl_lib/Thermal/Thermal Elements/Thermal Reference', [model '/ThermalRef']);
+set_param([model '/ThermalRef'], 'Position', posXY(500, 600));
+
+% Resistor: LConn1=left, RConn1=right
+add_line(model, 'R_Load/RConn1',      'Ground/LConn1', 'autorouting','on');
+add_line(model, 'SolverConfig/RConn1','R_Load/LConn1', 'autorouting','on');
+
+%% --- One Solar Cell block per string ---
 for s = 1:nStrings
-    nPanels = numel(config{s});
-    yPos = 100 + (s-1) * 120;
-    
-    subsysName = sprintf('String_%d', s);
-    subsysPath = [model '/' subsysName];
-    
-    % Add subsystem block
-    add_block('built-in/Subsystem', subsysPath);
-    set_param(subsysPath, 'Position', posXY(300, yPos));
-    
-    % Build internals of this string subsystem
-    build_string_subsystem(subsysPath, nPanels, s);
-    
-    stringHandles(s) = get_param(subsysPath, 'Handle');
-end
+    panelIDs = config{s};
+    yBase    = 80 + (s-1)*150;
+    xPV      = 220;
 
-%% --- Connect strings in parallel to load ---
-% All string positive outputs connect to load top terminal
-% All string negative outputs connect to ground
-for s = 1:nStrings
-    subsysName = sprintf('String_%d', s);
-    
-    % These line connections assume your subsystem has ports named
-    % 'p' (positive out) and 'n' (negative out)
-    % Adjust port names if yours differ
-    add_line(model, [subsysName '/p'], 'R_Load/p', 'autorouting', 'on');
-    add_line(model, [subsysName '/n'], 'Ground/LConn1', 'autorouting', 'on');
-end
+    pvName = sprintf('S%d_PV', s);
+    pvPath = [model '/' pvName];
 
-% Connect load bottom to ground
-add_line(model, 'R_Load/n', 'Ground/LConn1', 'autorouting', 'on');
+    add_block('ee_lib/Sources/Solar Cell', pvPath);
+    set_param(pvPath, 'Position', posXY(xPV, yBase));
+    set_param(pvPath, 'Isc',      sprintf('Isc * mean(Gvec(%s)) / 1000', mat2str(panelIDs)));
+    set_param(pvPath, 'Voc',      'Voc');
+    set_param(pvPath, 'N_series', sprintf('sum(NCells(%s))',              mat2str(panelIDs)));
 
-%% --- Save model ---
-save_system(model);
-fprintf('Model "%s.slx" built and saved successfully.\n', model);
-fprintf('Open it in Simulink to verify connections before running evaluate_user_configuration.\n');
+    % LConn1 = thermal
+    add_line(model, sprintf('%s/LConn1', pvName), 'ThermalRef/LConn1', 'autorouting','on');
 
-end % end build_solar_array
+    % LConn2 = electrical+, RConn1 = electrical-
+    % Negative terminal -> Ground
+    add_line(model, sprintf('%s/RConn1', pvName), 'Ground/LConn1', 'autorouting','on');
 
+    xSens = xPV + 170;
 
-%% =========================================================================
-function build_string_subsystem(subsysPath, nPanels, stringIndex)
-% Builds the internals of one string subsystem:
-%   nPanels Solar Cell blocks in series -> PS math for P=V*I -> logging
+    % Current sensor in series on positive terminal
+    % LConn1=in, RConn1=out, RConn2=PS signal
+    iSensName = sprintf('S%d_I_sens', s);
+    add_block('fl_lib/Electrical/Electrical Sensors/Current Sensor', [model '/' iSensName]);
+    set_param([model '/' iSensName], 'Position', posXY(xSens, yBase));
 
-    % Delete default content in new subsystem
-    delete_block(find_system(subsysPath, 'SearchDepth', 1, 'type', 'block'));
+    add_line(model, sprintf('%s/LConn2', pvName),    sprintf('%s/LConn1', iSensName), 'autorouting','on');
+    add_line(model, sprintf('%s/RConn1', iSensName), 'R_Load/LConn1',                'autorouting','on');
 
-    %% Add Solar Cell blocks
-    for k = 1:nPanels
-        cellName  = sprintf('PV_%d', k);
-        cellPath  = [subsysPath '/' cellName];
+    % Voltage sensor across +bus and Ground
+    % LConn1=+, RConn1=-, RConn2=PS signal
+    vSensName = sprintf('S%d_V_sens', s);
+    add_block('fl_lib/Electrical/Electrical Sensors/Voltage Sensor', [model '/' vSensName]);
+    set_param([model '/' vSensName], 'Position', posXY(xSens + 160, yBase - 80));
 
-        % NOTE: Verify this library path in YOUR MATLAB version by dragging
-        % a Solar Cell block into a blank model and running:
-        %   get_param('tempModel/Solar Cell', 'ReferenceBlock')
-        add_block('ee_lib/Sources/Solar Cell', cellPath);
-        set_param(cellPath, 'Position', posXY(100 + (k-1)*150, 150));
+    add_line(model, sprintf('%s/LConn1', vSensName), 'R_Load/LConn1', 'autorouting','on');
+    add_line(model, sprintf('%s/RConn1', vSensName), 'Ground/LConn1', 'autorouting','on');
 
-        % Parameterize — these variable names are set by evaluate_user_configuration
-        set_param(cellPath, 'Isc',    'Isc');
-        set_param(cellPath, 'Voc',    'Voc');
-        set_param(cellPath, 'Vmpp',   'Vmpp');
-        set_param(cellPath, 'Impp',   'Impp');
-        set_param(cellPath, 'Ncells', sprintf('NCells(%d)', k));
-        set_param(cellPath, 'Irr',    sprintf('Gvec(%d)', k));
-    end
+    % PS-Simulink converters
+    psVName = sprintf('S%d_PS_V', s);
+    psIName = sprintf('S%d_PS_I', s);
+    add_block('nesl_utility/PS-Simulink Converter', [model '/' psVName]);
+    add_block('nesl_utility/PS-Simulink Converter', [model '/' psIName]);
+    set_param([model '/' psVName], 'Position', posXY(xSens + 340, yBase - 80));
+    set_param([model '/' psIName], 'Position', posXY(xSens + 340, yBase));
 
-    %% Wire Solar Cells in series: PV_1.p -> PV_2.n -> PV_3.n ...
-    for k = 1:nPanels-1
-        add_line(subsysPath, ...
-            sprintf('PV_%d/p', k), ...
-            sprintf('PV_%d/n', k+1), ...
-            'autorouting', 'on');
-    end
+    add_line(model, sprintf('%s/RConn2', vSensName), sprintf('%s/RConn1', psVName), 'autorouting','on');
+    add_line(model, sprintf('%s/RConn2', iSensName), sprintf('%s/RConn1', psIName), 'autorouting','on');
 
-    %% Voltage sensor across the whole string (for P = V*I logging)
-    add_block('fl_lib/Electrical/Electrical Sensors/Voltage Sensor', ...
-        [subsysPath '/V_sens']);
-    set_param([subsysPath '/V_sens'], 'Position', posXY(100 + nPanels*150, 100));
+    % Product V*I
+    pCalcName = sprintf('S%d_P_calc', s);
+    add_block('simulink/Math Operations/Product', [model '/' pCalcName]);
+    set_param([model '/' pCalcName], 'Position', posXY(xSens + 500, yBase - 40));
 
-    add_block('fl_lib/Electrical/Electrical Sensors/Current Sensor', ...
-        [subsysPath '/I_sens']);
-    set_param([subsysPath '/I_sens'], 'Position', posXY(100 + nPanels*150, 200));
+    add_line(model, [psVName '/1'], [pCalcName '/1'], 'autorouting','on');
+    add_line(model, [psIName '/1'], [pCalcName '/2'], 'autorouting','on');
 
-    %% PS Simulink converters (to bring physical signals into Simulink math)
-    add_block('nesl_utility/PS-Simulink Converter', [subsysPath '/PS_V']);
-    add_block('nesl_utility/PS-Simulink Converter', [subsysPath '/PS_I']);
-    set_param([subsysPath '/PS_V'], 'Position', posXY(200 + nPanels*150, 100));
-    set_param([subsysPath '/PS_I'], 'Position', posXY(200 + nPanels*150, 200));
-
-    %% Multiply V*I to get power
-    add_block('simulink/Math Operations/Product', [subsysPath '/P_calc']);
-    set_param([subsysPath '/P_calc'], 'Position', posXY(300 + nPanels*150, 150));
-
-    %% To Workspace block for logging P_out
-    add_block('simulink/Sinks/To Workspace', [subsysPath '/P_log']);
-    set_param([subsysPath '/P_log'], ...
-        'VariableName', sprintf('P_out_str%d', stringIndex), ...
+    % To Workspace
+    pLogName = sprintf('S%d_P_log', s);
+    add_block('simulink/Sinks/To Workspace', [model '/' pLogName]);
+    set_param([model '/' pLogName], ...
+        'VariableName', sprintf('P_out_str%d', s), ...
         'SaveFormat',   'Structure With Time');
-    set_param([subsysPath '/P_log'], 'Position', posXY(400 + nPanels*150, 150));
+    set_param([model '/' pLogName], 'Position', posXY(xSens + 650, yBase - 40));
 
-    %% Wire sensors -> converters -> product -> log
-    add_line(subsysPath, 'V_sens/V', 'PS_V/I',   'autorouting', 'on');
-    add_line(subsysPath, 'I_sens/I', 'PS_I/I',   'autorouting', 'on');
-    add_line(subsysPath, 'PS_V/O',   'P_calc/1', 'autorouting', 'on');
-    add_line(subsysPath, 'PS_I/O',   'P_calc/2', 'autorouting', 'on');
-    add_line(subsysPath, 'P_calc/1', 'P_log/1',  'autorouting', 'on');
+    add_line(model, [pCalcName '/1'], [pLogName '/1'], 'autorouting','on');
+end
 
-    %% Add subsystem output ports (p = positive rail, n = negative rail)
-    add_block('built-in/Out1', [subsysPath '/p']);
-    add_block('built-in/Out1', [subsysPath '/n']);
+save_system(model);
+fprintf('\nBuilt and saved "%s.slx"\n', model);
+fprintf('Workspace vars needed: R_load, Voc, Isc, NCells, Gvec\n');
+end
 
-    % Connect first panel negative and last panel positive to output ports
-    add_line(subsysPath, 'PV_1/n',              'n/1', 'autorouting', 'on');
-    add_line(subsysPath, sprintf('PV_%d/p', nPanels), 'p/1', 'autorouting', 'on');
-
-end % end build_string_subsystem
-
-
-%% =========================================================================
 function pos = posXY(x, y)
-% Returns a [left top right bottom] position vector for set_param
     w = 60; h = 40;
     pos = [x, y, x+w, y+h];
 end
