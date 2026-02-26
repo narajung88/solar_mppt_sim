@@ -1,37 +1,44 @@
-%%script to run simulation
+%% Load Sweep Script
 clear;
-% Set workspace variables
-R_load = 10;        % ohms - adjust as needed, using a constant power load need to change
-Voc    = 0.6;       % volts per cell
-Isc    = 8.0;       % amps
-NCells = [36, 40, 48, 56, 60, 100, 100, 100, 100, 100, 100];  % cells per panel, length >= max panel index
-Gvec   = 1000 * ones(1, 11); % irradiance in W/m^2
 
-% Run simulation
-model = 'actual_solar_array_sim';  % or whatever your .slx is named
+% Workspace parameters
+Voc    = 0.6;
+Isc    = 8.0;
+NCells = [36, 40, 48, 56, 60, 100, 100, 100, 100, 100, 100];
+Gvec   = 1000 * ones(1, 11);
+
+model = 'single_solar_array_demo';
 load_system(model);
-simOut = sim(model);
 
-% Results are in simOut or logged to workspace depending on your To Workspace blocks
-% If you used To Workspace blocks, results appear directly as variables:
-% P_out_str1, P_out_str2, etc.
+% Sweep range
+R_vals = linspace(0.1, 20, 60);   % Adjust range if needed
 
-% Plot results
-figure;
-hold on;
+P_max = zeros(size(R_vals));
 
-for s = 1:5
-    varName = sprintf('P_out_str%d', s);
-
-    if isprop(simOut, varName)
-        data = simOut.(varName);   % Access inside simOut
-
-        plot(data.time, data.signals.values);
-    end
+for k = 1:length(R_vals)
+    
+    R_load = R_vals(k);   % Update load
+    
+    simOut = sim(model, 'StopTime', '1');
+    
+    % Assuming you are measuring total array power as P_total
+    data = simOut.P_total;  
+    
+    % Take final steady-state value
+    P_max(k) = max(data.Data);
 end
 
-xlabel('Time (s)');
-ylabel('Power (W)');
-legend(arrayfun(@(s) sprintf('String %d', s), 1:5, 'UniformOutput', false));
-title('String Power Output');
+% Find best load
+[bestPower, idx] = max(P_max);
+bestR = R_vals(idx);
+
+fprintf('Best R = %.3f ohms\n', bestR);
+fprintf('Max Power = %.3f W\n', bestPower);
+
+% Plot result
+figure;
+plot(R_vals, P_max, 'LineWidth', 2);
+xlabel('Load Resistance (Ohms)');
+ylabel('Maximum Power (W)');
+title('Load Sweep - Maximum Power vs Resistance');
 grid on;
