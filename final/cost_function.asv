@@ -1,0 +1,9 @@
+%Cost function is minimizing MPPT hardware and wiring cost
+%Cost of panels doesn't matter to us since number and cost of panels is
+%constant
+
+%M = number of MPPTs
+%s = number of panels connected in series with a single string
+%Cost = M * params.cost_per_mppt  + M * s * params.cost_per_string
+
+%Define acceptable power loss (in terms of percentage?
